@@ -1,0 +1,182 @@
+---
+title: "Practical machine learning: human activity recognition"
+author: "Wei Xu"
+date: "January 11, 2017"
+output:
+  html_document:
+    highlight: tango
+    theme: lumen
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit, it is now possible to collect a large amount of data about personal activity relatively inexpensively. These devices are part of the quantified self-movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. The goal of this project is to use machine learning and pattern recognition techniques to detect mistakes. 
+
+## Weight lifting exercises dataset
+
+In this project, we will use data from accelerometer sensors mounted on the belt, forearm, arm, and dumbbell of 6 participants who were performing barbell lifts correctly and incorrectly in 5 different ways. The goal is to predict the manner in which they did the exercise which is represented in the `classe` variable. The dataset is provided by E. Velloso *et al*, when they were studying the qualitative activity recognition of human excercises. More information is available from the website here: [http://groupware.les.inf.puc-rio.br/har][1]. 
+
+[1]: http://groupware.les.inf.puc-rio.br/har
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. **Qualitative Activity Recognition of Weight Lifting Exercises.** Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+## Data cleaning and preprocessing
+
+```{r load}
+pml_train <- read.csv("pml-training.csv")
+pml_test <- read.csv("pml-testing.csv")
+```
+
+The dataset is already well separated into the training and testing set. In this project, we will set the `pml_test` as the final validation set, and the data in `pml_train` will be used for the training of our models. The preliminary exploratory data analysis indicates that there are `na`s, empty data and purely labeling data in the original dataset.
+
+```{r clean, message=FALSE}
+library(caret)
+## zero variance data
+var.nzv <- nearZeroVar(pml_train)
+tidy_train <- pml_train[, -var.nzv]
+## cleaning na's
+var.na <- sapply(tidy_train, function(x) mean(is.na(x))) > 0.95
+tidy_train <- tidy_train[, !(var.na)]
+## remove features only about labeling samples
+tidy_train <- tidy_train[, -(1:6)]
+dim(tidy_train)
+```
+
+The data after cleanning have `r ncol(tidy_train)` features. It turns out these features extracted are all related to the **raw measurements** from the sensors located on the belt, forearm, arm and dumbell for detection of physical movements. The features cleared out are all related to the statistical analysis of the raw data, such as the mean, variance, standard deviation, etc. The data in `pml_test` should follow the same cleaning procedure and we assign the cleaned data to the final validation dataset.
+
+```{r validation clean}
+validation <- pml_test[, -var.nzv]
+validation <- validation[, !(var.na)]
+validation <- validation[, -(1:6)]
+```
+
+We need further split the training set into training/testing dataset in evaluate the models.
+
+```{r intrain}
+set.seed(33833)
+inTrain <- createDataPartition(y = tidy_train$classe, p = 0.7, list = FALSE)
+training <- tidy_train[inTrain, ]
+testing <- tidy_train[-inTrain, ]
+```
+
+## Model prediction
+
+### Random forest
+
+```{r rf, cache=TRUE, message=FALSE}
+## random forest
+rf.fit <- train(classe ~ ., data = training, method = "rf",
+                trControl = trainControl(method = "cv", number = 5))
+rf.fit
+```
+
+## Generalized boosted model
+
+```{r gbm, cache=TRUE, message=FALSE}
+## generalized boosted model
+gbm.fit <- train(classe ~ ., data = training, method = "gbm", 
+                 trControl = trainControl(method = "cv", number = 5), verbose = FALSE)
+gbm.fit
+```
+
+## Quadratic discriminant analysis
+
+```{r qda, cache=TRUE, message=FALSE}
+qda.fit <- train(classe ~ ., data = training, method = "qda",
+                 preProcess = c("center", "scale"))
+qda.fit
+```
+
+```{r model test, message=FALSE}
+rf.pred.test <- predict(rf.fit, testing)
+gbm.pred.test <- predict(gbm.fit, testing)
+qda.pred.test <- predict(qda.fit, testing)
+rbind(test.accuracy = c(rf = confusionMatrix(rf.pred.test, testing$classe)$overall[1],
+                        gbm = confusionMatrix(gbm.pred.test, testing$classe)$overall[1],
+                        qda = confusionMatrix(qda.pred.test, testing$classe)$overall[1]))
+```
+
+```{r heatmap conf, echo=FALSE, message=FALSE}
+## customize plot confusionmatrix function with heatmap.2
+library(gplots)
+confmat.heatmap <- function(cm, title) {
+      pal <- colorRampPalette(c(rgb(0.96,0.96,1), rgb(0.1,0.1,0.9)), space = "rgb")
+      heatmap.2(cm, Rowv = FALSE, Colv= FALSE, dendrogram = "none", main = title,
+          col = pal, tracecol = "#303030", trace = "none",
+          cellnote = cm, notecol = "black", notecex = 0.8,
+          density.info = "none", margins = c(0.1,0.1))
+}
+```
+
+```{r levelplot conf, echo=FALSE, message=FALSE}
+library(lattice)
+confmat.levelplt <- function(cm) {
+      pal <- colorRampPalette(c(rgb(0.96,0.96,1), rgb(0.1,0.1,0.9)), space = "rgb")
+      cm <- t(apply(cm, 1, function(x) x/sum(x)))  ## normalized by row
+      x <- 1:ncol(cm); y <- nrow(cm):1
+      grid <- expand.grid(X=x, Y=y)
+      grid$Z <- as.vector(cm)
+      
+      myPanel <- function(x, y, z, ...) {
+            panel.levelplot(x,y,z,...)
+            panel.text(x, y, round(z,2), cex = 0.6)}
+
+      levelplot(Z ~ X*Y, grid, panel = myPanel,
+                main = "", xlab = "Predicted Class", ylab = "Actual Class", 
+                cex = 0.5, col.regions = pal)
+}
+```
+
+```{r fig.height=3, message=FALSE}
+rf.cm <- confusionMatrix(rf.pred.test, testing$classe)$table
+gbm.cm <- confusionMatrix(gbm.pred.test, testing$classe)$table
+qda.cm <- confusionMatrix(qda.pred.test, testing$classe)$table
+
+library(latticeExtra)
+plt.rf <- confmat.levelplt(rf.cm)
+plt.gbm <- confmat.levelplt(gbm.cm)
+plt.qda <- confmat.levelplt(qda.cm)
+combinedplt <- c(plt.rf, plt.gbm, plt.qda, layout = c(3,1), merge.legends = FALSE)
+print(combinedplt)
+```
+
+Thus we used three statistical method to independently predict the `classe` variable in the human activity. The random forest method is applied in the original paper and an weighted accurary of 98.2% is reached with 17 selected features. Here, we found that the random forest method is still the most accurate method compared with stochastic gradient boosting and quadratic discriminant analysis. We included all the features (52 features) to predict the behavior class with five-fold cross-validation. The cross-validation accuracy is similar to the accuracy on testing data. The levelplot of the confusion matrices also reveals how each model behaves.
+
+## Ensembling method
+
+```{r comb}
+combinedTestData <- data.frame(rf.pred = rf.pred.test, gbm.pred = gbm.pred.test,
+                                  qda.pred = qda.pred.test, classe = testing$classe)
+comb.fit <- train(classe ~ ., data = combinedTestData, method = "rf",
+                  trControl = trainControl(method = "cv", number = 5))
+comb.fit
+```
+
+```{r comb pred}
+comb.pred.test <- predict(comb.fit, combinedTestData)
+rbind(out_of_sample_error = c(rf = 1 - confusionMatrix(rf.pred.test, testing$classe)$overall[1],
+                        gbm = 1 - confusionMatrix(gbm.pred.test, testing$classe)$overall[1],
+                        qda = 1 - confusionMatrix(qda.pred.test, testing$classe)$overall[1],
+                        comb = 1 - confusionMatrix(comb.pred.test, testing$classe)$overall[1]))
+```
+
+In general, combining predictions is supposed to increase the classfication accuracy. Here, we combine our three different classification method and apply random forest method to train the combined data set. The comparison of corresponding out of sample errors are also displayed. It turns out the ensembling method gives the same error rate compared to random forest method. We attribute this to the effect that the prediction accuracy of random forest method is already pretty high, thus leading to little increase in accuracy in the ensembling method.
+
+## Prediction on validation data
+
+Here is the final prediction result for the validation data set. We checked the result through online quiz and got all right. This is consistent with our high prediction accuracy above.
+
+```{r validation}
+rf.pred.val <- predict(rf.fit, validation)
+gbm.pred.val <- predict(gbm.fit, validation)
+qda.pred.val <- predict(qda.fit, validation)
+combinedValData <- data.frame(rf.pred = rf.pred.val, gbm.pred = gbm.pred.val,
+                              qda.pred = qda.pred.val)
+comb.pred.val <- predict(comb.fit, combinedValData)
+comb.pred.val
+```
